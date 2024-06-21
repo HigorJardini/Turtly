@@ -1037,6 +1037,7 @@ void emenu_loop() {
       M5.Rtc.GetBm8563Time();
       DISP.printf("%02d:%02d\n", M5.Rtc.Hour, M5.Rtc.Minute);
     #endif
+    DISP.setFreeFont(&fonts::Font0);
   }
 #endif // RTC
 
@@ -1064,6 +1065,8 @@ void btmenu_setup() {
 }
 
 void btmenu_loop() {
+  battery_show(false, 5000);
+  clock_show();
   if (check_next_press()) {
     cursor++;
     cursor = cursor % btmenu_size;
@@ -1182,6 +1185,8 @@ void aj_setup(){
 }
 
 void aj_loop(){
+  battery_show(false, 5000);
+  clock_show();
   if (!maelstrom){
     if (check_next_press()) {
       cursor++;
