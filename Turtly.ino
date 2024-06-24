@@ -1955,7 +1955,7 @@ void tvbgone_loop()
 /// IR MENU ///
 MENU irmenu[] = {
   { TXT_BACK, 1},
-  { "TV-B-Gone", 21},
+  { "TV-B-Gone", 22},
   
 };
 int irmenu_size = sizeof(irmenu) / sizeof (MENU);
